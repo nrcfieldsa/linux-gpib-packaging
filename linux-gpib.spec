@@ -1,3 +1,14 @@
+%bcond_without perl
+%bcond_without python2
+%bcond_without python3
+%bcond_without tcl
+ 
+%if 0%{?rhel}
+%bcond_with php
+%else
+%bcond_without php
+%endif
+
 %if 0%{?el8}
 %bcond_with docs
 %bcond_with guile
@@ -5,19 +16,15 @@
 %bcond_without docs
 %bcond_without guile
 %endif
-%bcond_without perl
-%if 0%{?rhel}
-%bcond_with php
-%else
-%bcond_without php
+
+%if 0%{?el9}
+%bcond_with python2
+%bcond_with guile
+%global _wrong_version_format_terminate_build 0
 %endif
-%bcond_without python2
-%bcond_without python3
-%bcond_without tcl
 
-
-%global svnrev 1809
-%global svndate 20190107
+%global svnrev 2094
+%global svndate 20230719
 
 %global _hardened_build 1
 
@@ -30,15 +37,15 @@
 
 %{?with_perl:%global perlname LinuxGpib}
 
-#%%if %%{with php}
-    ## from: https://docs.fedoraproject.org/en-US/packaging-guidelines/PHP/
-    #%%global php_apiver \
-        #%%((echo 0; php -i 2>/dev/null | sed -n 's/^PHP API => //p') | tail -1)
-    #%%global php_extdir \
-        #%%(php-config --extension-dir 2>/dev/null || echo "undefined")
-    #%%global php_version \
-        #%%(php-config --version 2>/dev/null || echo 0)
-#%%endif
+%if %{with php}
+    # from: https://docs.fedoraproject.org/en-US/packaging-guidelines/PHP/
+    %global php_apiver \
+        %((echo 0; php -i 2>/dev/null | sed -n 's/^PHP API => //p') | tail -1)
+    %global php_extdir \
+        %(php-config --extension-dir 2>/dev/null || echo "undefined")
+    %global php_version \
+        %(php-config --version 2>/dev/null || echo 0)
+%endif
 
 %if %{with tcl}
     # this is hacky, since the copr buildroot doesn't currently provide tclsh
@@ -50,7 +57,7 @@
 %endif
 
 Name:           linux-gpib
-Version:        4.2.0
+Version:        4.3.6
 Release:        2.%{svndate}svn%{svnrev}%{?dist}
 Summary:        Linux GPIB (IEEE-488) userspace library and programs
 
@@ -69,6 +76,7 @@ Source2:        60-%{name}-adapter.rules
 Source3:        %{name}-config@.service.in
 Source4:        dkms-%{name}.conf.in
 Source5:        %{name}-config-systemd
+Source6:        modprobe.d-gpib.conf
 
 # We don't need to mknod since we can let the driver and systemd take care of it
 Patch0:         %{name}-nodevnodes.patch
@@ -77,6 +85,7 @@ Patch1:         %{name}-remove-usb-autotools.patch
 Patch2:         %{name}-fix-tcl-manpage.patch
 Patch3:         %{name}-kernel-dont-ignore-errors.patch
 Patch4:         %{name}-kernel-fix-epel-build.patch
+Patch5:         %{name}-user-language-guile.patch
 
 Requires:       dkms-%{name}
 
@@ -164,15 +173,29 @@ This packages contains the kernel drivers for adapters compatible with:
     - TNT4882
 
 
-%if %{with guile}
+%if 0%{?with_guile}
+%if 0%{?el9}
+%package -n guile30-%{name}
+%else
 %package -n guile18-%{name}
+%endif
 Summary:        Guile %{name} module
 
+%if 0%{?el9}
+Requires:       guile30%{?_isa}
+Requires:       %{name}%{?_isa} = %{version}-%{release}
+BuildRequires:  guile30-devel
+%else
 Requires:       compat-guile18%{?_isa}
 Requires:       %{name}%{?_isa} = %{version}-%{release}
 BuildRequires:  compat-guile18-devel
+%endif
 
+%if 0%{?el9}
+%description -n guile30-%{name}
+%else
 %description -n guile18-%{name}
+%endif
 Guile bindings for %{name}.
 %endif
 
@@ -207,7 +230,7 @@ Perl bindings for %{name}.
 %endif
 
 
-%if %{with python2}
+%if %{with python2} && %{?rhel} < 9
 %package -n python2-%{name}
 Summary:        Python 2 %{name} module
 
@@ -265,8 +288,10 @@ HTML and PDF documentation for %{name}.
 %patch0 -p1
 %patch1 -p1
 %patch2 -p1
-%patch3 -p1
+# do not attempt to patch for Makefile in EL9 w/ recent linux-gpib source
+%{!?el9:%patch3 -p1}
 %{?el7:%patch4 -p1}
+%{?el9:%patch5 -p1}
 
 pushd %{name}-kernel
 sed -e 's/__VERSION_STRING/%{version}/g' %{SOURCE4} > dkms.conf
@@ -274,6 +299,12 @@ popd
 
 %build
 pushd %{name}-user
+
+# ChangeLog is in SVN trunk and required
+%if %{?el9}
+cp -p $RPM_BUILD_DIR/%{name}-code-%{svnrev}-trunk/ChangeLog .
+%endif
+
 autoreconf -vif
 
 # we make the docs, and the Perl and Python bindings in the spec, 
@@ -285,11 +316,18 @@ autoreconf -vif
     --disable-documentation \
     --disable-python-binding \
     --disable-perl-binding \
-    --disable-static
+    --disable-static \
+    YACC=bison
 
 %make_build
 
 pushd language
+%if %{with guile}
+    pushd guile
+    %make_build
+    popd
+%endif
+
 %if %{with perl}
     %{__make} perl/Makefile.PL
 
@@ -300,9 +338,12 @@ pushd language
 %endif
 
 pushd python
-%{?with_python2:%py2_build}
+%if %{with python2} && %{?rhel} < 9
+%py2_build
+%endif
 %{?with_python3:%py3_build}
 popd
+
 popd # language
 popd # %%{name}-user
 
@@ -328,15 +369,20 @@ pushd %{name}-user
 
 pushd language
 pushd guile
-%{?with_guile:install -p -m 0644 gpib.scm %{buildroot}%{guile_site}}
+    make DESTDIR=%{buildroot} install
+    mkdir -p %{buildroot}/usr/lib64
+    libtool --finish %{buildroot}/usr/lib64
+    %{?with_guile:install -p -m 0644 gpib.scm %{buildroot}%{guile_site}}
 popd
 
 pushd perl
-%{?with_perl:%{__make} pure_install DESTDIR=%{buildroot}}
+    %{?with_perl:%{__make} pure_install DESTDIR=%{buildroot}}
 popd
 
 pushd python
-%{?with_python2:%py2_install}
+%if %{with python2} && %{?rhel} < 9
+    %py2_install
+%endif
 %{?with_python3:%py3_install}
 popd
 
@@ -395,6 +441,10 @@ popd # doc
 install -d %{buildroot}%{_udevrulesdir}
 install -p -m 0644 %{SOURCE2} %{buildroot}%{_udevrulesdir}
 
+# modprobe rules
+install -d %{buildroot}%{_modprobedir}
+install -p -m 0644 %{SOURCE6} %{buildroot}%{_modprobedir}/gpib.conf
+
 # systemd config unit
 install -d %{buildroot}%{_unitdir}
 sed -e 's|@libexecdir@|%{_libexecdir}|g' %{SOURCE3} > %{name}-config@.service
@@ -427,7 +477,8 @@ popd
 
 # Sanity check to make sure the kernel modules compile
 pushd %{name}-kernel
-%make_build LINUX_SRCDIR=%{ksrcdir}
+%make_build LINUX_SRCDIR=/lib/modules/%{kversion}/build
+#LINUX_SRCDIR=%{ksrcdir} # old kernels prior 4.x
 popd
 
 
@@ -448,7 +499,11 @@ popd
 # and ldconfig
 %ldconfig_scriptlets devel
 
+%if %{?el9}
+%{?with_guile:%ldconfig_scriptlets -n guile30-%{name}}
+%else
 %{?with_guile:%ldconfig_scriptlets -n guile18-%{name}}
+%endif
 
 %{?with_tcl:%ldconfig_scriptlets -n tcl-%{name}}
 
@@ -480,6 +535,7 @@ udevadm control --reload > /dev/null 2>&1 || :
 %attr(755,root,root) %{_bindir}/ibtest
 %attr(755,root,root) %{_sbindir}/gpib_config
 %attr(755,root,root) %{_libexecdir}/linux-gpib-config-systemd
+%attr(755,root,root) %{_bindir}/findlisteners
 
 %{_mandir}/man1/*
 %{_mandir}/man5/*
@@ -491,6 +547,7 @@ udevadm control --reload > /dev/null 2>&1 || :
 
 %{_unitdir}/*.service
 %{_udevrulesdir}/*.rules
+%{_modprobedir}/gpib.conf
 
 %files -n dkms-%{name}
 
@@ -512,9 +569,9 @@ udevadm control --reload > /dev/null 2>&1 || :
 
 %{_includedir}/gpib/gpib_user.h
 %{_includedir}/gpib/ib.h
+%{_includedir}/gpib/gpib_version.h
 %{_libdir}/pkgconfig/libgpib.pc
 %{_libdir}/libgpib.so
-
 %{_mandir}/man3/*.3*
 
 %if %{with perl}
@@ -523,7 +580,8 @@ udevadm control --reload > /dev/null 2>&1 || :
 
 
 %if %{with guile}
-%files -n guile18-%{name}
+%{?el9:%files -n guile30-%{name}}
+%{!?el9:%files -n guile18-%{name}}
 %defattr(644,root,root,755)
 
 %doc %{name}-user/language/guile/README
@@ -554,8 +612,8 @@ udevadm control --reload > /dev/null 2>&1 || :
 %{python3_sitearch}/*
 %endif
 
-
-%if %{with python2}
+# python2 support is dropped in rhel 9:
+%if %{with python2} && %{?rhel} < 9
 %files -n python2-%{name}
 %defattr(644,root,root,755)
 
@@ -607,6 +665,8 @@ udevadm control --reload > /dev/null 2>&1 || :
 
 
 %changelog
+* Wed Apr 10 2024 Allan Fields <allan-dot-fields-at-nrc.ca> - 4.3.6-2.20230719svn2094
+- Update spec for RHEL9
 * Sun Feb 24 2019 Colin Samples <colin-dot-samples-at-gmail-dot-com> - 4.2.0-2.20190107svn1809
 - Fix Agilent adapter configuation
 * Sun Feb 24 2019 Colin Samples <colin-dot-samples-at-gmail-dot-com> - 4.2.0-1.20190107svn1809
